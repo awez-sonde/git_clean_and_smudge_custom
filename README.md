@@ -29,11 +29,26 @@ To use this in **another** Git repository, copy the items below and commit every
 | `local_secrets_map.json` | **No** — gitignored | **Your** rules (subnets, domains, salt) |
 | `local_secrets_learned.json` | **No** — gitignored | Auto-saved passwords from YAML (created on first `git add`) |
 
-**Minimum `.gitignore` lines to add:**
+**Add the minimum `.gitignore` entries** (run from your repo root):
 
-```gitignore
+```bash
+# Append both private map files (safe to run more than once if lines already exist)
+cat >> .gitignore <<'EOF'
 local_secrets_map.json
 local_secrets_learned.json
+EOF
+
+# Confirm Git will ignore them
+git check-ignore -v local_secrets_map.json local_secrets_learned.json
+```
+
+If `.gitignore` does not exist yet:
+
+```bash
+cat > .gitignore <<'EOF'
+local_secrets_map.json
+local_secrets_learned.json
+EOF
 ```
 
 **One-time Git setup** (run inside each clone of the repo):
@@ -86,15 +101,71 @@ These file types are covered by `*.yaml` / `*.yml` in `.gitattributes`:
 **Supported well**
 
 - IPv4 and CIDR anywhere in the file (subnet rules)
-- `stringData:` / `data:`-style lines: `password: mysecret`
 - Container env: `- name: MY_PASSWORD` then `value: mysecret`
 - Route / ingress `host:` FQDNs (via `email_domains` — works on hostnames, not only emails)
+- Kubernetes `Secret` manifests using **`stringData:`** (plain text; see below)
 
 **See examples:** `examples/openshift/`
 
+### Use `stringData:` for OpenShift / Kubernetes Secrets
+
+For this filter to rewrite secret values in YAML, use **`stringData`** with normal plain-text values. The filter reads the file as text and matches keys like `password`, `api_key`, etc.
+
+**Recommended (works with this tool):**
+
+```yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app-credentials
+type: Opaque
+stringData:
+  password: P@ssw0rd!Customer#2024
+  api_key: customer-api-key-xyz
+```
+
+After `git add`, Git stores dummies (e.g. `password: DUMMY_SEC_77d6ae159093`). Your local file still shows real values after checkout.
+
+**Avoid for filtered manifests:** `data:` with base64 — the filter does **not** decode base64, so real secrets would stay in Git:
+
+```yaml
+# Not supported by the filter — do not use this pattern in committed YAML
+data:
+  password: UGFzc3dvcmQxMjM=   # base64; unchanged by the filter
+```
+
+If you must use `data:` in the cluster, generate Secrets outside this repo, or keep those files out of Git.
+
+### Custom secret types (only some keys)
+
+By default, keys listed under `sensitive_fields.keys` in `local_secrets_map.json` are sanitized (e.g. `password`, `secret`, `token`). To handle **your** Secret field names, add them to that list — this is the custom knob per “type” of value:
+
+```json
+"sensitive_fields": {
+  "keys": [
+    "password",
+    "secret",
+    "api_key",
+    "oauthclientsecret",
+    "bind-password",
+    "my-custom-license-key"
+  ]
+}
+```
+
+Example: only hash the keys you care about in `stringData`:
+
+```yaml
+stringData:
+  password: real-db-password          # sanitized (key in list)
+  oauthclientsecret: real-oauth       # sanitized if you add "oauthclientsecret"
+  description: Customer ACME install  # left unchanged (key not in list)
+```
+
+Env vars use the same idea: names like `DATABASE_PASSWORD` are matched automatically when they contain words such as `password`, `secret`, or `token` (see `examples/openshift/deployment.yaml`).
+
 **Limitations (important)**
 
-- `data:` values that are **base64** are not decoded — prefer `stringData:` for secrets you need sanitized, or keep those files out of Git.
 - Very complex YAML (multiline `|`, folded blocks) may need manual `replacements` in the map file.
 - Add extra `subnet_rules` / `email_domains` for each customer environment.
 
