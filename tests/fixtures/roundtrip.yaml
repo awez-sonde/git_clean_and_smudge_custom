@@ -1,0 +1,5 @@
+database:
+  host: 192.168.50.10
+  password: RoundtripPassword42
+network:
+  cidr: 192.168.50.0/24

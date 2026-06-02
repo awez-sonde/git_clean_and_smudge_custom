@@ -6,6 +6,8 @@ local_secrets_map.json
 local_secrets_learned.json
 .env.mapping
 scripts/__pycache__/
+tests/fixtures/.sanitization.learned.test.json
+tests/__pycache__/
 
 # Local overrides
 *.local

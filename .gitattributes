@@ -15,6 +15,9 @@
 *.json              filter=sanitize-secrets
 *.toml              filter=sanitize-secrets
 
+# Test fixtures contain intentional plaintext for round-trip tests
+tests/fixtures/**                 -filter
+
 # Never run the filter on sanitization config / learned cache
 sanitization.json                 -filter
 sanitization.json.example         -filter

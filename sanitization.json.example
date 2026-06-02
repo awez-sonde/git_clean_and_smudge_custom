@@ -6,7 +6,7 @@
     {
       "actual_cidr": "192.168.50.0/24",
       "dummy_cidr": "10.0.0.0/24",
-      "comment": "Customer VLAN \u2014 any 192.168.50.x IP in YAML becomes 10.0.0.x in Git"
+      "comment": "Customer VLAN — any 192.168.50.x IP in YAML becomes 10.0.0.x in Git"
     }
   ],
   "email_domains": [
@@ -16,7 +16,7 @@
         "keystone.internal"
       ],
       "dummy_domain": "apps.example.com",
-      "comment": "Route hosts and emails: app.customer-corp.example \u2192 app.apps.example.com"
+      "comment": "Route hosts and emails: app.customer-corp.example → app.apps.example.com"
     }
   ],
   "sensitive_fields": {
@@ -45,11 +45,12 @@
       "privkey",
       "clientsecret",
       "client_secret",
-      "admin",
-      "user",
+      "username",
+      "admin_pass",
       "ldap",
       "bind",
-      "auth",
+      "auth_token",
+      "auth_key",
       "registry",
       "pullsecret",
       "pull_secret",
@@ -60,7 +61,6 @@
       "ssh_key",
       "signing",
       "encryption",
-      "salt",
       "certificate",
       "cacert",
       "ca_cert",

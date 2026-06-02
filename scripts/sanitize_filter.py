@@ -19,6 +19,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -28,6 +29,7 @@ from sanitize_common import (  # noqa: E402
     CIDR_RE,
     CONFIG_ENV_VAR,
     CONFIG_FILENAME,
+    DEFAULT_SALT,
     HOSTNAME_RE,
     IPV4_RE,
     LEARNED_ENV_VAR,
@@ -53,23 +55,36 @@ K8S_ENV_NAME_RE = re.compile(
     r"^(\s*)- name:\s*(?:\"([^\"]*)\"|'([^']*)'|(\S+))\s*(#.*)?$"
 )
 
-# Case-insensitive substring match on YAML/env KEY names (not hard-coded service names).
-# Covers OpenStack (TripleO), OpenShift/K8s, LDAP, auth endpoints, registry creds, etc.
+# YAML block scalar: key: |  or  key: >
+BLOCK_SCALAR_START_RE = re.compile(
+    r"^(\s*)([A-Za-z0-9_.-]+)(\s*:\s*)(\||>)\s*(#.*)?$"
+)
+
+# JSON double-quoted key/value pairs
+JSON_STRING_PAIR_RE = re.compile(
+    r'"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"(\s*,)?'
+)
+
+# Hostname rewrite only on value side of these keys
+HOST_VALUE_KEY_RE = re.compile(
+    r"^(\s*(?:host|hostname|server|endpoint|url)\s*:\s*)(.*)$",
+    re.IGNORECASE,
+)
+
+QUOTED_STRING_RE = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
+
 DEFAULT_KEY_SUBSTRINGS = (
-    # Passwords & passphrases
     "password",
     "passwd",
     "pwd",
     "passphrase",
     "htpasswd",
-    # Secrets & tokens
     "secret",
     "token",
     "credential",
     "bearer",
     "jwt",
     "oauth",
-    # API / access keys
     "apikey",
     "api_key",
     "accesskey",
@@ -81,40 +96,33 @@ DEFAULT_KEY_SUBSTRINGS = (
     "privkey",
     "clientsecret",
     "client_secret",
-    # Admin, LDAP, auth (OpenStack identity / bind / URLs)
-    "admin",
-    "user",
+    "username",
+    "admin_pass",
     "ldap",
     "bind",
-    "auth",
-    # Registry & image pull (OpenShift)
+    "auth_token",
+    "auth_key",
     "registry",
     "pullsecret",
     "pull_secret",
     "dockerconfig",
-    # Crypto / TLS material often holding sensitive blobs
     "keystore",
     "truststore",
     "sshkey",
     "ssh_key",
     "signing",
     "encryption",
-    "salt",
     "certificate",
     "cacert",
     "ca_cert",
     "tls",
-    # DB / connection strings (when key name includes these words)
     "connstring",
     "connectionstring",
     "connection_string",
     "license",
 )
 
-# Optional exact key names (in addition to substring rules)
 DEFAULT_SENSITIVE_KEYS: frozenset[str] = frozenset()
-
-# Sanitize "value:" when the preceding "- name:" matches sensitive key rules
 K8S_VALUE_KEY = "value"
 
 
@@ -145,11 +153,9 @@ class EmailDomainRule:
 
 @dataclass
 class SensitiveFields:
-    """Match config keys by substring (password in keystone_password) and/or exact name."""
-
     keys: frozenset[str] = field(default_factory=lambda: DEFAULT_SENSITIVE_KEYS)
     key_substrings: tuple[str, ...] = field(default_factory=lambda: DEFAULT_KEY_SUBSTRINGS)
-    match_mode: str = "contains"  # contains | exact | both
+    match_mode: str = "contains"
     dummy_prefix: str = "DUMMY_SEC_"
     token_length: int = 12
 
@@ -217,9 +223,29 @@ def load_learned(path: Path) -> dict[str, str]:
 def save_learned(path: Path, learned: dict[str, str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"version": 1, "learned": dict(sorted(learned.items()))}
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-        f.write("\n")
+    fd, tmp_path = tempfile.mkstemp(
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+    )
+    tmp = Path(tmp_path)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2)
+            f.write("\n")
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _validate_dummy_subnet_overlap(rules: list[SubnetRule]) -> None:
+    for i, a in enumerate(rules):
+        for b in rules[i + 1 :]:
+            if a.dummy_net.overlaps(b.dummy_net):
+                raise ValueError(
+                    f"subnet_rules dummy CIDRs overlap: {a.dummy_cidr} and {b.dummy_cidr}"
+                )
 
 
 def load_config(path: Path) -> SanitizeConfig:
@@ -246,6 +272,7 @@ def load_config(path: Path) -> SanitizeConfig:
         if not actual_cidr or not dummy_cidr:
             raise ValueError(f"subnet_rules[{i}] requires actual_cidr and dummy_cidr")
         subnet_rules.append(SubnetRule(str(actual_cidr), str(dummy_cidr)))
+    _validate_dummy_subnet_overlap(subnet_rules)
 
     email_rules: list[EmailDomainRule] = []
     for i, item in enumerate(data.get("email_domains", [])):
@@ -295,8 +322,18 @@ def load_config(path: Path) -> SanitizeConfig:
         email_rules=email_rules,
         sensitive_fields=sensitive_fields,
         auto_learn=bool(data.get("auto_learn", True)),
-        salt=str(data.get("salt", "change-me-in-sanitization.json")),
+        salt=str(data.get("salt", DEFAULT_SALT)),
     )
+
+
+def _load_context() -> tuple[SanitizeConfig, dict[str, str], Path, Path]:
+    config_path = map_path()
+    learned_p = learned_path()
+    if not config_path.is_file():
+        raise FileNotFoundError(str(config_path))
+    config = load_config(config_path)
+    learned = load_learned(learned_p)
+    return config, learned, config_path, learned_p
 
 
 def _map_ip_between_networks(
@@ -353,7 +390,6 @@ def apply_subnet_rules(text: str, rules: list[SubnetRule], *, reverse: bool) -> 
     def repl_ip(match: re.Match[str]) -> str:
         return map_ip_string(match.group(0))
 
-    # CIDR first so we do not partially rewrite network addresses inside CIDRs
     text = CIDR_RE.sub(repl_cidr, text)
     text = IPV4_RE.sub(repl_ip, text)
     return text
@@ -373,7 +409,6 @@ def _swap_email_domain(email: str, rule: EmailDomainRule, *, reverse: bool) -> s
 
 
 def _swap_hostname_domain(hostname: str, rule: EmailDomainRule, *, reverse: bool) -> str | None:
-    """OpenShift Route / ingress hosts (no @): app.customer.example → app.dummy.example"""
     host = hostname.lower()
     if reverse:
         dummy = rule.dummy_domain.lower()
@@ -395,6 +430,29 @@ def _swap_hostname_domain(hostname: str, rule: EmailDomainRule, *, reverse: bool
     return None
 
 
+def _swap_hostnames_in_fragment(fragment: str, rules: list[EmailDomainRule], *, reverse: bool) -> str:
+    def repl_host(match: re.Match[str]) -> str:
+        host = match.group(0)
+        if "@" in host:
+            return host
+        for rule in rules:
+            swapped = _swap_hostname_domain(host, rule, reverse=reverse)
+            if swapped is not None:
+                return swapped
+        return host
+
+    return HOSTNAME_RE.sub(repl_host, fragment)
+
+
+def _apply_hostnames_in_quoted_strings(line: str, rules: list[EmailDomainRule], *, reverse: bool) -> str:
+    def repl_quoted(match: re.Match[str]) -> str:
+        inner = match.group(1)
+        swapped = _swap_hostnames_in_fragment(inner, rules, reverse=reverse)
+        return f'"{swapped}"'
+
+    return QUOTED_STRING_RE.sub(repl_quoted, line)
+
+
 def apply_email_domain_rules(
     text: str, rules: list[EmailDomainRule], *, reverse: bool
 ) -> str:
@@ -411,18 +469,29 @@ def apply_email_domain_rules(
 
     text = EMAIL_RE.sub(repl_email, text)
 
-    # Hostnames in YAML (spec.host, URLs) — same email_domains config
-    def repl_host(match: re.Match[str]) -> str:
-        host = match.group(0)
-        if "@" in host:
-            return host
-        for rule in rules:
-            swapped = _swap_hostname_domain(host, rule, reverse=reverse)
-            if swapped is not None:
-                return swapped
-        return host
+    lines_out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        newline = ""
+        if line.endswith("\n"):
+            newline = "\n"
+            body = line[:-1]
+        elif line.endswith("\r\n"):
+            newline = "\r\n"
+            body = line[:-2]
+        else:
+            body = line
 
-    return HOSTNAME_RE.sub(repl_host, text)
+        host_m = HOST_VALUE_KEY_RE.match(body)
+        if host_m:
+            prefix, value = host_m.groups()
+            value = _swap_hostnames_in_fragment(value, rules, reverse=reverse)
+            body = prefix + value
+        else:
+            body = _apply_hostnames_in_quoted_strings(body, rules, reverse=reverse)
+
+        lines_out.append(body + newline)
+
+    return "".join(lines_out)
 
 
 def secret_token(actual: str, cfg: SensitiveFields, salt: str) -> str:
@@ -435,15 +504,10 @@ def _k8s_env_name_from_match(groups: tuple) -> str:
     return dq if dq is not None else (sq if sq is not None else (bare or ""))
 
 
-def _normalize_key_name(name: str) -> str:
-    return name.lower().replace("-", "_")
-
-
 def _is_sensitive_key_name(name: str, cfg: SensitiveFields) -> bool:
-    """True if a YAML/env key should be treated as a secret (case-insensitive)."""
     if not name:
         return False
-    normalized = _normalize_key_name(name)
+    normalized = name.lower().replace("-", "_")
 
     if cfg.match_mode in ("exact", "both") and cfg.keys:
         if normalized in cfg.keys:
@@ -455,10 +519,6 @@ def _is_sensitive_key_name(name: str, cfg: SensitiveFields) -> bool:
     return False
 
 
-def _is_sensitive_k8s_env(name: str, cfg: SensitiveFields) -> bool:
-    return _is_sensitive_key_name(name, cfg)
-
-
 def _replace_field_value(
     value: str,
     cfg: SensitiveFields,
@@ -467,28 +527,28 @@ def _replace_field_value(
     *,
     reverse: bool,
     auto_learn: bool,
-) -> str | None:
-    """Return new value if changed, or None if unchanged / should skip."""
+) -> tuple[str | None, bool]:
+    """Return (new_value, learned_dirty). learned_dirty True only when a NEW mapping is added."""
     if not value:
-        return None
+        return None, False
 
-    new_value = value
     if reverse:
         for actual, dummy in learned.items():
             if dummy == value:
-                return actual
+                return actual, False
         if value.startswith(cfg.dummy_prefix):
-            return None
-        return None
+            return None, False
+        return None, False
 
     if value.startswith(cfg.dummy_prefix):
-        return None
+        return None, False
     if value in learned:
-        return learned[value]
+        return learned[value], False
     new_value = secret_token(value, cfg, salt)
     if auto_learn:
         learned[value] = new_value
-    return new_value
+        return new_value, True
+    return new_value, False
 
 
 def _render_field_line(
@@ -509,6 +569,62 @@ def _render_field_line(
     return body + newline
 
 
+def _split_line(line: str) -> tuple[str, str]:
+    if line.endswith("\r\n"):
+        return line[:-2], "\r\n"
+    if line.endswith("\n"):
+        return line[:-1], "\n"
+    return line, ""
+
+
+def _indent_width(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def _block_body_text(body_lines: list[str], content_indent: int) -> str:
+    """Normalize YAML block scalar body (strip block indentation, preserve line breaks)."""
+    parts: list[str] = []
+    for line in body_lines:
+        body, _ = _split_line(line)
+        if not body.strip():
+            continue
+        if len(body) >= content_indent:
+            parts.append(body[content_indent:])
+        else:
+            parts.append(body.strip())
+    return "\n".join(parts)
+
+
+def apply_json_field_rules(
+    text: str,
+    cfg: SensitiveFields,
+    salt: str,
+    learned: dict[str, str],
+    *,
+    reverse: bool,
+    auto_learn: bool,
+) -> tuple[str, dict[str, str], bool]:
+    dirty = False
+
+    def repl(match: re.Match[str]) -> str:
+        nonlocal dirty
+        key, value, comma = match.group(1), match.group(2), match.group(3)
+        if not _is_sensitive_key_name(key, cfg):
+            return match.group(0)
+        if key.lower() == "email" and "@" in value and not reverse:
+            return match.group(0)
+        new_value, entry_dirty = _replace_field_value(
+            value, cfg, salt, learned, reverse=reverse, auto_learn=auto_learn
+        )
+        if entry_dirty:
+            dirty = True
+        if new_value is None or new_value == value:
+            return match.group(0)
+        return f'"{key}": "{new_value}"{comma}'
+
+    return JSON_STRING_PAIR_RE.sub(repl, text), learned, dirty
+
+
 def apply_sensitive_field_rules(
     text: str,
     cfg: SensitiveFields,
@@ -517,33 +633,79 @@ def apply_sensitive_field_rules(
     *,
     reverse: bool,
     auto_learn: bool,
-) -> tuple[str, dict[str, str]]:
-    """Detect secrets in YAML/properties and OpenShift/Kubernetes env blocks."""
+) -> tuple[str, dict[str, str], bool]:
+    lines = text.splitlines(keepends=True)
     lines_out: list[str] = []
-    changed = False
+    dirty = False
     pending_k8s_env: str | None = None
+    i = 0
 
-    for line in text.splitlines(keepends=True):
-        newline = ""
-        if line.endswith("\n"):
-            newline = "\n"
-            body = line[:-1]
-        elif line.endswith("\r\n"):
-            newline = "\r\n"
-            body = line[:-2]
-        else:
-            body = line
+    while i < len(lines):
+        line = lines[i]
+        body, newline = _split_line(line)
 
         k8s_name = K8S_ENV_NAME_RE.match(body)
         if k8s_name:
             pending_k8s_env = _k8s_env_name_from_match(k8s_name.groups())
             lines_out.append(line)
+            i += 1
+            continue
+
+        block_m = BLOCK_SCALAR_START_RE.match(body)
+        if block_m:
+            indent, key, sep, _marker, comment = block_m.groups()
+            if _is_sensitive_key_name(key, cfg):
+                base_indent = len(indent)
+                body_lines: list[str] = []
+                j = i + 1
+                while j < len(lines):
+                    next_body, _ = _split_line(lines[j])
+                    if next_body.strip() == "":
+                        body_lines.append(lines[j])
+                        j += 1
+                        continue
+                    if _indent_width(next_body) <= base_indent:
+                        break
+                    body_lines.append(lines[j])
+                    j += 1
+
+                content_indent = base_indent + 2
+                block_core = _block_body_text(body_lines, content_indent)
+
+                new_token, entry_dirty = _replace_field_value(
+                    block_core,
+                    cfg,
+                    salt,
+                    learned,
+                    reverse=reverse,
+                    auto_learn=auto_learn,
+                )
+                if entry_dirty:
+                    dirty = True
+
+                if new_token is not None and new_token != block_core:
+                    pad = indent + "  "
+                    header = f"{indent}{key}{sep}|"
+                    if comment:
+                        header += comment
+                    lines_out.append(header + newline)
+                    if reverse:
+                        for ln in new_token.split("\n"):
+                            lines_out.append(f"{pad}{ln}{newline}")
+                    else:
+                        lines_out.append(f"{pad}{new_token}{newline}")
+                    i = j
+                    continue
+
+            lines_out.append(line)
+            i += 1
             continue
 
         m = FIELD_LINE_RE.match(body)
         if not m:
             pending_k8s_env = None
             lines_out.append(line)
+            i += 1
             continue
 
         indent, key, sep, dq, sq, bare, comment = m.groups()
@@ -558,31 +720,36 @@ def apply_sensitive_field_rules(
 
         sensitive = _is_sensitive_key_name(key, cfg)
         if not sensitive and key_lower == K8S_VALUE_KEY and pending_k8s_env:
-            sensitive = _is_sensitive_k8s_env(pending_k8s_env, cfg)
+            sensitive = _is_sensitive_key_name(pending_k8s_env, cfg)
 
         pending_k8s_env = None
 
         if not sensitive:
             lines_out.append(line)
+            i += 1
             continue
 
         if key_lower == "email" and "@" in value and not reverse:
             lines_out.append(line)
+            i += 1
             continue
 
-        new_value = _replace_field_value(
+        new_value, entry_dirty = _replace_field_value(
             value, cfg, salt, learned, reverse=reverse, auto_learn=auto_learn
         )
+        if entry_dirty:
+            dirty = True
         if new_value is None or new_value == value:
             lines_out.append(line)
+            i += 1
             continue
 
-        changed = True
         lines_out.append(
             _render_field_line(indent, key, sep, quote, new_value, comment, newline)
         )
+        i += 1
 
-    return "".join(lines_out), learned if changed or auto_learn else learned
+    return "".join(lines_out), learned, dirty
 
 
 def apply_literal_replacements(
@@ -600,10 +767,12 @@ def transform(
     learned: dict[str, str],
     *,
     reverse: bool,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, dict[str, str], bool]:
+    learned_dirty = False
+
     if reverse:
         if config.sensitive_fields:
-            text, learned = apply_sensitive_field_rules(
+            text, learned, d = apply_json_field_rules(
                 text,
                 config.sensitive_fields,
                 config.salt,
@@ -611,6 +780,16 @@ def transform(
                 reverse=True,
                 auto_learn=False,
             )
+            learned_dirty = learned_dirty or d
+            text, learned, d = apply_sensitive_field_rules(
+                text,
+                config.sensitive_fields,
+                config.salt,
+                learned,
+                reverse=True,
+                auto_learn=False,
+            )
+            learned_dirty = learned_dirty or d
         text = apply_email_domain_rules(text, config.email_rules, reverse=True)
         text = apply_subnet_rules(text, config.subnet_rules, reverse=True)
         inverted = [(d, a) for a, d in config.replacements]
@@ -620,7 +799,7 @@ def transform(
         text = apply_subnet_rules(text, config.subnet_rules, reverse=False)
         text = apply_email_domain_rules(text, config.email_rules, reverse=False)
         if config.sensitive_fields:
-            text, learned = apply_sensitive_field_rules(
+            text, learned, d = apply_sensitive_field_rules(
                 text,
                 config.sensitive_fields,
                 config.salt,
@@ -628,24 +807,36 @@ def transform(
                 reverse=False,
                 auto_learn=config.auto_learn,
             )
-    return text, learned
+            learned_dirty = learned_dirty or d
+            text, learned, d = apply_json_field_rules(
+                text,
+                config.sensitive_fields,
+                config.salt,
+                learned,
+                reverse=False,
+                auto_learn=config.auto_learn,
+            )
+            learned_dirty = learned_dirty or d
+
+    return text, learned, learned_dirty
 
 
 def read_stdin() -> str:
-    return sys.stdin.buffer.read().decode("utf-8")
+    return sys.stdin.buffer.read().decode("utf-8", errors="surrogateescape")
 
 
 def write_stdout(text: str) -> None:
-    sys.stdout.buffer.write(text.encode("utf-8"))
+    sys.stdout.buffer.write(text.encode("utf-8", errors="surrogateescape"))
 
 
 def run_clean() -> int:
-    path = map_path()
     content = read_stdin()
 
-    if not path.is_file():
+    try:
+        config, learned, _config_path, learned_p = _load_context()
+    except FileNotFoundError as exc:
         print(
-            f"sanitize_filter (clean): config not found: {path}\n"
+            f"sanitize_filter (clean): config not found: {exc}\n"
             f"Refusing to stage — copy {CONFIG_FILENAME}.example to {CONFIG_FILENAME},\n"
             f"or run: python3 scripts/discover_sanitization.py --write\n"
             "This prevents accidentally committing real secrets.",
@@ -654,11 +845,9 @@ def run_clean() -> int:
         return 1
 
     try:
-        config = load_config(path)
-        learned = load_learned(learned_path())
-        content, learned = transform(content, config, learned, reverse=False)
-        if config.auto_learn and config.sensitive_fields:
-            save_learned(learned_path(), learned)
+        content, learned, learned_dirty = transform(content, config, learned, reverse=False)
+        if learned_dirty:
+            save_learned(learned_p, learned)
     except (json.JSONDecodeError, ValueError, OSError) as exc:
         print(f"sanitize_filter (clean): invalid config: {exc}", file=sys.stderr)
         return 1
@@ -668,12 +857,13 @@ def run_clean() -> int:
 
 
 def run_smudge() -> int:
-    path = map_path()
     content = read_stdin()
 
-    if not path.is_file():
+    try:
+        config, learned, _config_path, _learned_p = _load_context()
+    except FileNotFoundError as exc:
         print(
-            f"sanitize_filter (smudge): config not found: {path}\n"
+            f"sanitize_filter (smudge): config not found: {exc}\n"
             "Passing repository content through unchanged (dummy placeholders remain).\n"
             f"Restore {CONFIG_FILENAME} and {LEARNED_FILENAME} from your secure backup.",
             file=sys.stderr,
@@ -682,10 +872,7 @@ def run_smudge() -> int:
         return 0
 
     try:
-        config = load_config(path)
-        learned_path_ = learned_path()
-        learned = load_learned(learned_path_) if learned_path_.is_file() else {}
-        content, _ = transform(content, config, learned, reverse=True)
+        content, _, _ = transform(content, config, learned, reverse=True)
     except (json.JSONDecodeError, ValueError, OSError) as exc:
         print(
             f"sanitize_filter (smudge): invalid config: {exc}\n"

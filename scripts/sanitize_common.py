@@ -22,15 +22,20 @@ LEARNED_ENV_VAR = "SANITIZATION_LEARNED"
 LEGACY_CONFIG_ENV_VAR = "GIT_SECRETS_MAP"
 LEGACY_LEARNED_ENV_VAR = "GIT_SECRETS_LEARNED"
 
+DEFAULT_SALT = "change-me-to-a-random-string"
+
 SCAN_EXTENSIONS = frozenset(
     {".yaml", ".yml", ".conf", ".config", ".ini", ".properties", ".env", ".json", ".toml"}
 )
 SKIP_DIR_NAMES = frozenset({".git", ".venv", "venv", "node_modules", "__pycache__"})
 
 _IPV4_OCTET = r"(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)"
-IPV4_RE = re.compile(rf"\b(?:{_IPV4_OCTET}\.){{3}}{_IPV4_OCTET}\b")
+# Not preceded/followed by digit or dot — avoids helm-3.14.2, v1.21.0 (finding 7)
+IPV4_RE = re.compile(
+    rf"(?<![0-9.])(?:{_IPV4_OCTET}\.){{3}}{_IPV4_OCTET}(?![0-9.])"
+)
 CIDR_RE = re.compile(
-    rf"\b(?:{_IPV4_OCTET}\.){{3}}{_IPV4_OCTET}/(?:[0-9]|[1-2][0-9]|3[0-2])\b"
+    rf"(?<![0-9.])(?:{_IPV4_OCTET}\.){{3}}{_IPV4_OCTET}/(?:[0-9]|[1-2][0-9]|3[0-2])(?![0-9.])"
 )
 HOSTNAME_RE = re.compile(
     r"\b[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
@@ -261,7 +266,7 @@ def build_updated_config(repo_root: Path, base: dict | None = None) -> dict:
     domains = scan_repo_for_domains(repo_root)
 
     base.setdefault("version", 2)
-    base.setdefault("salt", "change-me-to-a-random-string")
+    base.setdefault("salt", DEFAULT_SALT)
     base.setdefault("auto_learn", True)
     base.setdefault("replacements", [])
     base.setdefault("sensitive_fields", {"match_mode": "contains"})
