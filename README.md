@@ -16,6 +16,30 @@ Works with **YAML** (OpenShift, Kubernetes, OpenStack), plus `.conf`, `.env`, `.
 
 ## Copy into your repo
 
+### Option A — install script (recommended)
+
+From the **sanitizer repo**, run:
+
+```bash
+chmod +x scripts/install_sanitization.sh
+
+./scripts/install_sanitization.sh /path/to/your-repo
+# or with both paths explicit:
+./scripts/install_sanitization.sh /path/to/your-repo /path/to/git_clean_and_smudge_custom
+```
+
+The script will:
+
+1. Copy `scripts/sanitize_filter.py`, `sanitize_common.py`, `discover_sanitization.py`
+2. Copy `sanitization.json.example` and install `.gitattributes`
+3. Append gitignore entries for private config files
+4. Configure `git config --local filter.sanitize-secrets.*`
+5. Create `sanitization.json` and run `discover_sanitization.py --write`
+
+It **does not** run `git add` or `git commit` — you do that when ready (see script output).
+
+### Option B — manual copy
+
 | File | Commit? | Purpose |
 |------|---------|---------|
 | `scripts/sanitize_filter.py` | Yes | Filter (Python 3) |
@@ -69,7 +93,7 @@ python3 scripts/discover_sanitization.py --write-example
 Example output:
 
 ```
-Scanned /Users/you/OSP_on_OCP_clone
+Scanned /path/to/your-repo
   Networks: 6  Domains: 1
   192.168.10.0/24 → 10.0.10.0/24
   172.17.0.0/24 → 10.0.17.0/24
@@ -122,7 +146,7 @@ git push
 
 ```bash
 python3 scripts/sanitize_filter.py clean < examples/openstack/allocation.yaml
-python3 scripts/sanitize_filter.py clean < 03_secret/01_osp_ctlplnae_secret.yaml
+python3 scripts/sanitize_filter.py clean < examples/openstack/allocation.yaml
 ```
 
 ---
@@ -130,6 +154,7 @@ python3 scripts/sanitize_filter.py clean < 03_secret/01_osp_ctlplnae_secret.yaml
 ## Repo layout
 
 ```
+scripts/install_sanitization.sh  # one-command setup into another repo
 scripts/sanitize_filter.py
 scripts/sanitize_common.py
 scripts/discover_sanitization.py
