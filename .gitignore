@@ -1,5 +1,6 @@
 # Secret sanitization config (never commit the live files)
 sanitization.json
+!tests/fixtures/sanitization.json
 sanitization.learned.json
 # Legacy names (still supported by the filter)
 local_secrets_map.json

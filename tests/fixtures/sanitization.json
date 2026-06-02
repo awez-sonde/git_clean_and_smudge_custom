@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "salt": "test-salt-fixed",
+  "subnet_rules": [
+    { "actual_cidr": "192.168.50.0/24", "dummy_cidr": "10.0.0.0/24" }
+  ],
+  "email_domains": [],
+  "sensitive_fields": { "match_mode": "contains" },
+  "auto_learn": true,
+  "replacements": []
+}
