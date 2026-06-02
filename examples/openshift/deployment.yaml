@@ -1,0 +1,18 @@
+# OpenShift / Kubernetes Deployment — YAML is fully supported
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-app
+spec:
+  template:
+    spec:
+      containers:
+        - name: app
+          env:
+            - name: DATABASE_PASSWORD
+              value: DUMMY_SEC_77d6ae159093
+            - name: REGISTRY_TOKEN
+              value: DUMMY_SEC_eddf9b6c63a3
+          envFrom:
+            - secretRef:
+                name: app-credentials

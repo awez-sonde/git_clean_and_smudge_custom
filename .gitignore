@@ -1,0 +1,9 @@
+# Secret mapping: real credentials → dummy placeholders (never commit)
+local_secrets_map.json
+local_secrets_learned.json
+.env.mapping
+
+# Local overrides
+*.local
+.env
+.env.local
