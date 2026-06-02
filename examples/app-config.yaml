@@ -1,4 +1,4 @@
-# Example: local working copy uses ACTUAL values from local_secrets_map.json.
+# Example: local working copy uses ACTUAL values from sanitization.json.
 # After git add/commit, the repository stores DUMMY values.
 
 database:
@@ -10,4 +10,4 @@ network:
   customer_subnet: 10.0.0.0/24
 
 contact:
-  email: DUMMY_SEC_6cc62b63a2c6
+  email: admin@apps.example.com

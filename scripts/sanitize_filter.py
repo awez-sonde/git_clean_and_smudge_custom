@@ -6,8 +6,8 @@ Modes:
   clean  — actual → dummy (staging)
   smudge — dummy → actual (checkout)
 
-Mapping: local_secrets_map.json (gitignored). Optional auto-cache:
-  local_secrets_learned.json (gitignored) for values detected by field rules.
+Mapping: sanitization.json (gitignored). Optional cache:
+  sanitization.learned.json (gitignored) for values detected by field rules.
 """
 
 from __future__ import annotations
@@ -22,17 +22,22 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_MAP_FILENAME = "local_secrets_map.json"
-DEFAULT_LEARNED_FILENAME = "local_secrets_learned.json"
-MAP_ENV_VAR = "GIT_SECRETS_MAP"
-LEARNED_ENV_VAR = "GIT_SECRETS_LEARNED"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# IPv4 and CIDR (e.g. 192.168.50.0/24)
-_IPV4_OCTET = r"(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)"
-IPV4_RE = re.compile(rf"\b(?:{_IPV4_OCTET}\.){{3}}{_IPV4_OCTET}\b")
-CIDR_RE = re.compile(
-    rf"\b(?:{_IPV4_OCTET}\.){{3}}{_IPV4_OCTET}/(?:[0-9]|[1-2][0-9]|3[0-2])\b"
+from sanitize_common import (  # noqa: E402
+    CIDR_RE,
+    CONFIG_ENV_VAR,
+    CONFIG_FILENAME,
+    HOSTNAME_RE,
+    IPV4_RE,
+    LEARNED_ENV_VAR,
+    LEARNED_FILENAME,
+    LEGACY_CONFIG_ENV_VAR,
+    LEGACY_LEARNED_ENV_VAR,
+    resolve_config_path,
+    resolve_learned_path,
 )
+
 EMAIL_RE = re.compile(
     r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"
 )
@@ -176,24 +181,26 @@ def _repo_root() -> Path | None:
         return None
 
 
+def _config_env_path() -> str | None:
+    return os.environ.get(CONFIG_ENV_VAR) or os.environ.get(LEGACY_CONFIG_ENV_VAR)
+
+
+def _learned_env_path() -> str | None:
+    return os.environ.get(LEARNED_ENV_VAR) or os.environ.get(LEGACY_LEARNED_ENV_VAR)
+
+
 def map_path() -> Path:
-    explicit = os.environ.get(MAP_ENV_VAR)
+    explicit = _config_env_path()
     if explicit:
         return Path(explicit).expanduser().resolve()
-    root = _repo_root()
-    if root is not None:
-        return root / DEFAULT_MAP_FILENAME
-    return Path.cwd() / DEFAULT_MAP_FILENAME
+    root = _repo_root() or Path.cwd()
+    return resolve_config_path(root) or root / CONFIG_FILENAME
 
 
 def learned_path() -> Path:
-    explicit = os.environ.get(LEARNED_ENV_VAR)
-    if explicit:
-        return Path(explicit).expanduser().resolve()
-    root = _repo_root()
-    if root is not None:
-        return root / DEFAULT_LEARNED_FILENAME
-    return Path.cwd() / DEFAULT_LEARNED_FILENAME
+    explicit = _learned_env_path()
+    root = _repo_root() or Path.cwd()
+    return resolve_learned_path(root, explicit)
 
 
 def load_learned(path: Path) -> dict[str, str]:
@@ -288,7 +295,7 @@ def load_config(path: Path) -> SanitizeConfig:
         email_rules=email_rules,
         sensitive_fields=sensitive_fields,
         auto_learn=bool(data.get("auto_learn", True)),
-        salt=str(data.get("salt", "change-me-in-local_secrets_map.json")),
+        salt=str(data.get("salt", "change-me-in-sanitization.json")),
     )
 
 
@@ -416,13 +423,6 @@ def apply_email_domain_rules(
         return host
 
     return HOSTNAME_RE.sub(repl_host, text)
-
-
-# FQDN-like tokens (Route hosts, service DNS); requires at least two labels
-HOSTNAME_RE = re.compile(
-    r"\b[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
-    r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+\b"
-)
 
 
 def secret_token(actual: str, cfg: SensitiveFields, salt: str) -> str:
@@ -645,8 +645,9 @@ def run_clean() -> int:
 
     if not path.is_file():
         print(
-            f"sanitize_filter (clean): mapping file not found: {path}\n"
-            "Refusing to stage — create the mapping file or set GIT_SECRETS_MAP.\n"
+            f"sanitize_filter (clean): config not found: {path}\n"
+            f"Refusing to stage — copy {CONFIG_FILENAME}.example to {CONFIG_FILENAME},\n"
+            f"or run: python3 scripts/discover_sanitization.py --write\n"
             "This prevents accidentally committing real secrets.",
             file=sys.stderr,
         )
@@ -672,9 +673,9 @@ def run_smudge() -> int:
 
     if not path.is_file():
         print(
-            f"sanitize_filter (smudge): mapping file not found: {path}\n"
+            f"sanitize_filter (smudge): config not found: {path}\n"
             "Passing repository content through unchanged (dummy placeholders remain).\n"
-            "Restore local_secrets_map.json from your secure backup to get real values.",
+            f"Restore {CONFIG_FILENAME} and {LEARNED_FILENAME} from your secure backup.",
             file=sys.stderr,
         )
         write_stdout(content)

@@ -1,7 +1,11 @@
-# Secret mapping: real credentials → dummy placeholders (never commit)
+# Secret sanitization config (never commit the live files)
+sanitization.json
+sanitization.learned.json
+# Legacy names (still supported by the filter)
 local_secrets_map.json
 local_secrets_learned.json
 .env.mapping
+scripts/__pycache__/
 
 # Local overrides
 *.local

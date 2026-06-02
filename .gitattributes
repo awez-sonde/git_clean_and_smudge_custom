@@ -1,14 +1,11 @@
 # Sanitize on git add; restore on checkout. See README.md for setup.
-#
-# YAML / YML — OpenShift, Kubernetes, Helm, Ansible, plain config
+
 *.yaml              filter=sanitize-secrets
 *.yml               filter=sanitize-secrets
 **/templates/*      filter=sanitize-secrets
 **/manifests/*      filter=sanitize-secrets
 **/deploy/*         filter=sanitize-secrets
 **/openshift/*      filter=sanitize-secrets
-
-# Other common config formats
 *.txt               filter=sanitize-secrets
 *.conf              filter=sanitize-secrets
 *.config            filter=sanitize-secrets
@@ -18,12 +15,11 @@
 *.json              filter=sanitize-secrets
 *.toml              filter=sanitize-secrets
 
-# Never run the filter on secret-mapping files themselves
-local_secrets_map.json          -filter
-local_secrets_map.json.example  -filter
-local_secrets_learned.json      -filter
-.env.mapping                    -filter
-
-# Optional: limit YAML filtering to cluster config only (comment out global *.yaml above)
-# openshift/**                  filter=sanitize-secrets
-# manifests/**                  filter=sanitize-secrets
+# Never run the filter on sanitization config / learned cache
+sanitization.json                 -filter
+sanitization.json.example         -filter
+sanitization.learned.json         -filter
+local_secrets_map.json            -filter
+local_secrets_map.json.example    -filter
+local_secrets_learned.json        -filter
+.env.mapping                      -filter
