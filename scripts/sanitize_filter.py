@@ -48,40 +48,68 @@ K8S_ENV_NAME_RE = re.compile(
     r"^(\s*)- name:\s*(?:\"([^\"]*)\"|'([^']*)'|(\S+))\s*(#.*)?$"
 )
 
-# Env var names containing these hints are sanitized on the next "value:" line
-K8S_ENV_NAME_HINT_RE = re.compile(
-    r"(?i)(password|passwd|pwd|secret|token|credential|api[_-]?key|"
-    r"client[_-]?secret|private[_-]?key|oauth|bind|htpasswd)"
+# Case-insensitive substring match on YAML/env KEY names (not hard-coded service names).
+# Covers OpenStack (TripleO), OpenShift/K8s, LDAP, auth endpoints, registry creds, etc.
+DEFAULT_KEY_SUBSTRINGS = (
+    # Passwords & passphrases
+    "password",
+    "passwd",
+    "pwd",
+    "passphrase",
+    "htpasswd",
+    # Secrets & tokens
+    "secret",
+    "token",
+    "credential",
+    "bearer",
+    "jwt",
+    "oauth",
+    # API / access keys
+    "apikey",
+    "api_key",
+    "accesskey",
+    "access_key",
+    "secretkey",
+    "secret_key",
+    "privatekey",
+    "private_key",
+    "privkey",
+    "clientsecret",
+    "client_secret",
+    # Admin, LDAP, auth (OpenStack identity / bind / URLs)
+    "admin",
+    "user",
+    "ldap",
+    "bind",
+    "auth",
+    # Registry & image pull (OpenShift)
+    "registry",
+    "pullsecret",
+    "pull_secret",
+    "dockerconfig",
+    # Crypto / TLS material often holding sensitive blobs
+    "keystore",
+    "truststore",
+    "sshkey",
+    "ssh_key",
+    "signing",
+    "encryption",
+    "salt",
+    "certificate",
+    "cacert",
+    "ca_cert",
+    "tls",
+    # DB / connection strings (when key name includes these words)
+    "connstring",
+    "connectionstring",
+    "connection_string",
+    "license",
 )
 
-DEFAULT_SENSITIVE_KEYS = frozenset(
-    {
-        "password",
-        "passwd",
-        "pwd",
-        "secret",
-        "api_key",
-        "apikey",
-        "api-key",
-        "token",
-        "auth_token",
-        "access_token",
-        "private_key",
-        "username",
-        "user",
-        "login",
-        # OpenShift — use email_domains for Route host: / hostname: FQDNs
-        "clientsecret",
-        "client-secret",
-        "bindpassword",
-        "bind-password",
-        "oauthsecret",
-        "htpasswd",
-        # "email" omitted — use email_domains; add "email" to config keys if needed
-    }
-)
+# Optional exact key names (in addition to substring rules)
+DEFAULT_SENSITIVE_KEYS: frozenset[str] = frozenset()
 
-# Sanitize "value:" when the preceding "- name:" matches K8s_ENV_NAME_HINT_RE
+# Sanitize "value:" when the preceding "- name:" matches sensitive key rules
 K8S_VALUE_KEY = "value"
 
 
@@ -112,7 +140,11 @@ class EmailDomainRule:
 
 @dataclass
 class SensitiveFields:
+    """Match config keys by substring (password in keystone_password) and/or exact name."""
+
     keys: frozenset[str] = field(default_factory=lambda: DEFAULT_SENSITIVE_KEYS)
+    key_substrings: tuple[str, ...] = field(default_factory=lambda: DEFAULT_KEY_SUBSTRINGS)
+    match_mode: str = "contains"  # contains | exact | both
     dummy_prefix: str = "DUMMY_SEC_"
     token_length: int = 12
 
@@ -228,12 +260,24 @@ def load_config(path: Path) -> SanitizeConfig:
         elif isinstance(sf, dict):
             keys = sf.get("keys")
             key_set = (
-                frozenset(k.lower() for k in keys)
-                if keys
+                frozenset(k.lower().replace("-", "_") for k in keys)
+                if keys is not None
                 else DEFAULT_SENSITIVE_KEYS
             )
+            subs = sf.get("key_substrings")
+            if subs is not None:
+                key_substrings = tuple(
+                    s.lower().replace("-", "_") for s in subs if str(s).strip()
+                )
+            else:
+                key_substrings = DEFAULT_KEY_SUBSTRINGS
+            match_mode = str(sf.get("match_mode", "contains")).lower()
+            if match_mode not in ("contains", "exact", "both"):
+                raise ValueError("sensitive_fields.match_mode must be contains, exact, or both")
             sensitive_fields = SensitiveFields(
                 keys=key_set,
+                key_substrings=key_substrings,
+                match_mode=match_mode,
                 dummy_prefix=str(sf.get("dummy_prefix", "DUMMY_SEC_")),
                 token_length=int(sf.get("token_length", 12)),
             )
@@ -391,14 +435,28 @@ def _k8s_env_name_from_match(groups: tuple) -> str:
     return dq if dq is not None else (sq if sq is not None else (bare or ""))
 
 
-def _is_sensitive_k8s_env(name: str, cfg: SensitiveFields) -> bool:
+def _normalize_key_name(name: str) -> str:
+    return name.lower().replace("-", "_")
+
+
+def _is_sensitive_key_name(name: str, cfg: SensitiveFields) -> bool:
+    """True if a YAML/env key should be treated as a secret (case-insensitive)."""
     if not name:
         return False
-    normalized = name.lower().replace("-", "_")
-    for key in cfg.keys:
-        if key.replace("-", "_") in normalized:
+    normalized = _normalize_key_name(name)
+
+    if cfg.match_mode in ("exact", "both") and cfg.keys:
+        if normalized in cfg.keys:
             return True
-    return K8S_ENV_NAME_HINT_RE.search(name) is not None
+
+    if cfg.match_mode in ("contains", "both") and cfg.key_substrings:
+        return any(sub in normalized for sub in cfg.key_substrings)
+
+    return False
+
+
+def _is_sensitive_k8s_env(name: str, cfg: SensitiveFields) -> bool:
+    return _is_sensitive_key_name(name, cfg)
 
 
 def _replace_field_value(
@@ -498,7 +556,7 @@ def apply_sensitive_field_rules(
         else:
             value, quote = bare or "", ""
 
-        sensitive = key_lower in cfg.keys
+        sensitive = _is_sensitive_key_name(key, cfg)
         if not sensitive and key_lower == K8S_VALUE_KEY and pending_k8s_env:
             sensitive = _is_sensitive_k8s_env(pending_k8s_env, cfg)
 

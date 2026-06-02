@@ -82,11 +82,11 @@ You configure **rules once** in `local_secrets_map.json`. You do **not** list ev
 |------|---------|
 | **Subnet** | All `192.168.50.x` → `10.0.0.x` in any YAML line |
 | **Email / route host domain** | `app.customer-corp.example` → `app.apps.example.com` |
-| **YAML keys** | `password:`, `secret:`, `token:`, … |
+| **YAML / env key names** | Any key whose name **contains** `password`, `secret`, `token`, … (case-insensitive), e.g. `Keystone_Password`, `http_password`, `nova_apiPassword` |
 | **Route / host domains** | `app.customer-corp.example` → `app.apps.example.com` |
 | **OpenShift `env:` blocks** | `- name: DATABASE_PASSWORD` + `value: …` |
 
-Passwords become `DUMMY_SEC_xxxxxxxxxxxx` in Git; the real text is stored in `local_secrets_learned.json`.
+Matched secret **values** become `DUMMY_SEC_xxxxxxxxxxxx` in Git. The real text is stored in **`local_secrets_learned.json`** (auto-updated on `git add`), not in `local_secrets_map.json`. The map file only holds **rules** (subnets, domains, which words to match in key names).
 
 ---
 
@@ -109,7 +109,7 @@ These file types are covered by `*.yaml` / `*.yml` in `.gitattributes`:
 
 ### Use `stringData:` for OpenShift / Kubernetes Secrets
 
-For this filter to rewrite secret values in YAML, use **`stringData`** with normal plain-text values. The filter reads the file as text and matches keys like `password`, `api_key`, etc.
+For this filter to rewrite secret values in YAML, use **`stringData`** with normal plain-text values. The filter matches **key names** that contain words like `password` or `secret` (see [Automatic key detection](#automatic-key-detection) below).
 
 **Recommended (works with this tool):**
 
@@ -136,33 +136,67 @@ data:
 
 If you must use `data:` in the cluster, generate Secrets outside this repo, or keep those files out of Git.
 
-### Custom secret types (only some keys)
+### Automatic key detection
 
-By default, keys listed under `sensitive_fields.keys` in `local_secrets_map.json` are sanitized (e.g. `password`, `secret`, `token`). To handle **your** Secret field names, add them to that list — this is the custom knob per “type” of value:
+**Your understanding (updated behaviour):** the filter does **not** only match a key literally named `password`. It matches any field name that **contains** a configured word, **case-insensitive**, including:
+
+| Key in your file | Why matched? |
+|------------------|--------------|
+| `AdminPassword`, `AodhDatabasePassword` | contains `password` |
+| `admin_user` | contains `admin` and `user` |
+| `ldap_bind`, `ldap_bind_password` | contains `ldap` / `bind` / `password` |
+| `auth_url`, `IdentityAuthURL` | contains `auth` |
+| `pull_secret`, `dockerconfigjson` | contains `pull_secret` / `dockerconfig` |
+| `cluster_description` | No matching substring |
+
+Default `key_substrings` include OpenStack / OpenShift patterns: `password`, `secret`, `token`, `admin`, `user`, `ldap`, `bind`, `auth`, `registry`, `pull_secret`, `tls`, and more (see `local_secrets_map.json.example`).
+
+Configure or trim words in `local_secrets_map.json`:
 
 ```json
 "sensitive_fields": {
-  "keys": [
-    "password",
-    "secret",
-    "api_key",
-    "oauthclientsecret",
-    "bind-password",
-    "my-custom-license-key"
+  "match_mode": "contains",
+  "key_substrings": [
+    "password", "secret", "token", "admin", "user", "ldap", "bind", "auth"
   ]
 }
 ```
 
-Example: only hash the keys you care about in `stringData`:
+Remove a word from the list if it matches too many keys in your repo (e.g. drop `user` if you only want `admin_user`-style fields via `admin`).
+
+- **`match_mode: "contains"`** (default) — substring match on key names; best for OpenStack / many password fields.
+- **`match_mode: "exact"`** — only keys listed in `"keys": ["password", ...]`.
+- **`match_mode: "both"`** — substring rules plus exact extras.
+
+**Where values are stored:** on `git add`, new secrets are written to **`local_secrets_learned.json`** (gitignored). You do **not** add each password to `local_secrets_map.json` by hand.
+
+**OpenStack example:** `examples/openstack/allocation.yaml`
+
+### Custom secret types (extra words or exact keys)
+
+Add another substring if your manifests use a special naming pattern:
+
+```json
+"key_substrings": ["password", "secret", "licensekey", "ldapbind"]
+```
+
+Or exact-only keys:
+
+```json
+"match_mode": "exact",
+"keys": ["my_special_credential"]
+```
+
+Example in `stringData`:
 
 ```yaml
 stringData:
-  password: real-db-password          # sanitized (key in list)
-  oauthclientsecret: real-oauth       # sanitized if you add "oauthclientsecret"
-  description: Customer ACME install  # left unchanged (key not in list)
+  keystone_password: real-keystone    # sanitized (contains "password")
+  oauthclientsecret: real-oauth       # sanitized (contains "secret")
+  description: Customer ACME install  # left unchanged
 ```
 
-Env vars use the same idea: names like `DATABASE_PASSWORD` are matched automatically when they contain words such as `password`, `secret`, or `token` (see `examples/openshift/deployment.yaml`).
+Env vars: `- name: KEYSTONE_PASSWORD` + `value: …` uses the same rules (`examples/openshift/deployment.yaml`).
 
 **Limitations (important)**
 
@@ -183,9 +217,10 @@ Env vars use the same idea: names like `DATABASE_PASSWORD` are matched automatic
   }
 ],
 "sensitive_fields": {
-  "keys": [
-    "password", "secret", "token", "api_key",
-    "client-secret", "bind-password", "htpasswd"
+  "match_mode": "contains",
+  "key_substrings": [
+    "password", "secret", "token", "admin", "user", "ldap", "bind", "auth",
+    "registry", "pull_secret", "oauth", "tls"
   ]
 }
 ```
@@ -204,6 +239,9 @@ printf 'host: 192.168.50.11\n' | python3 scripts/sanitize_filter.py clean
 
 # OpenShift env block
 python3 scripts/sanitize_filter.py clean < examples/openshift/deployment.yaml
+
+# OpenStack-style password keys (keystone_password, HTTPPassword, …)
+python3 scripts/sanitize_filter.py clean < examples/openstack/allocation.yaml
 ```
 
 ---
@@ -237,5 +275,6 @@ local_secrets_map.json.example  # template (required)
 local_secrets_map.json          # your rules (local only)
 local_secrets_learned.json      # auto passwords (local only)
 examples/openshift/             # sample YAML
+examples/openstack/             # password key auto-detection
 examples/app-config.yaml
 ```
