@@ -1,0 +1,13 @@
+# Example: local working copy uses ACTUAL values from local_secrets_map.json.
+# After git add/commit, the repository stores DUMMY values.
+
+database:
+  host: 10.0.0.10
+  backup_host: 10.0.0.11
+  password: DUMMY_SEC_77d6ae159093
+
+network:
+  customer_subnet: 10.0.0.0/24
+
+contact:
+  email: DUMMY_SEC_6cc62b63a2c6
