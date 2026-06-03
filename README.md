@@ -101,8 +101,10 @@ Scanned /path/to/your-repo
 ```
 
 - **Merges** with existing rules (won't delete manual entries).
-- Assigns dummy CIDRs in `10.0.0.0/8` (e.g. `172.17.0.0/24` → `10.0.17.0/24`).
+- Assigns dummy CIDRs with the **same prefix length** as each actual, preferring RFC 5737 documentation space (`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`), then RFC 6598 (`100.64.0.0/10`), then `10.0.0.0/8` only if needed. Dummies never overlap any actual subnet in the config.
 - Discovers lab domains like `awezlab.local` from hostnames in YAML.
+
+**Prefix lengths:** A **bare IP** in YAML (e.g. `host: 10.1.2.3`) is discovered as a **/24** network. To discover or sanitize at true size — **/32 host routes**, **/23 supernets**, **/16**, etc. — write an **explicit CIDR** in the file (`10.10.10.5/32`, `192.168.0.0/23`) or add a manual `subnet_rules` entry. The clean/smudge filter supports all prefix lengths from /8 through /32 once a rule exists.
 
 **First-time setup:**
 

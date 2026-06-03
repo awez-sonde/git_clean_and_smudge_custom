@@ -136,6 +136,7 @@ def infer_networks_from_text(text: str) -> set[ipaddress.IPv4Network]:
             continue
         if str(ip).startswith("0."):
             continue
+        # Bare IPs are bucketed to /24 for discovery; explicit CIDR keeps true prefix length.
         net = ipaddress.ip_network(f"{ip}/24", strict=False)
         if _is_routable_customer_net(net):
             found.add(net)
@@ -192,8 +193,19 @@ def suggest_dummy_cidr(
     for candidate in _iter_dummy_candidates(actual.prefixlen, pools):
         if _dummy_candidate_rejected(candidate, actual, all_actuals, used_dummies):
             continue
+        if candidate.prefixlen != actual.prefixlen:
+            raise ValueError(
+                f"internal error: dummy {candidate} prefix length "
+                f"does not match actual {actual}"
+            )
         return candidate
-    raise ValueError(f"Could not assign dummy CIDR for {actual}")
+    pool_list = ", ".join(str(p) for p in pools)
+    raise ValueError(
+        f"Could not assign a non-overlapping dummy /{actual.prefixlen} for actual {actual}. "
+        f"No free subnet of the same prefix length remains in dummy pools: {pool_list}. "
+        f"Prefixes shorter than /24 cannot use RFC 5737 documentation /24 pools — add a "
+        f"manual subnet_rules entry or extend address pools."
+    )
 
 
 def discover_subnet_rules(networks: set[ipaddress.IPv4Network]) -> list[dict[str, str]]:
