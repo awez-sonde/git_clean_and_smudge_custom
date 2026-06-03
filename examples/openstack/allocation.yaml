@@ -1,11 +1,11 @@
-# OpenStack / TripleO-style — keys matched by substring rules, not hard-coded names.
+# OpenStack / TripleO-style — *Password keys sanitize; admin_user / auth URLs stay clear.
 parameters:
-  AdminPassword: DUMMY_SEC_d09b98daf1af
-  AodhPassword: DUMMY_SEC_d09b98daf1af
-  AodhDatabasePassword: DUMMY_SEC_d09b98daf1af
-  BarbicanDatabasePassword: DUMMY_SEC_d09b98daf1af
-  admin_user: DUMMY_SEC_28ef41419675
-  ldap_bind_password: DUMMY_SEC_73705c7b5a1f
-  auth_url: DUMMY_SEC_a673ce453a15
-  IdentityAuthURL: DUMMY_SEC_380e306d5a6d
+  AdminPassword: DUMMY_SEC_example_admin
+  AodhPassword: DUMMY_SEC_example_aodh
+  AodhDatabasePassword: DUMMY_SEC_example_aodh_db
+  BarbicanDatabasePassword: DUMMY_SEC_example_barbican_db
+  admin_user: DUMMY_SEC_5d235a134d2a
+  ldap_bind_password: DUMMY_SEC_example_ldap_bind
+  auth_url: DUMMY_SEC_1975866eb809
+  IdentityAuthURL: DUMMY_SEC_1975866eb809
   cluster_description: Production OpenStack cell
