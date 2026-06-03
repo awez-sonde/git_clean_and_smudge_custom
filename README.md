@@ -146,6 +146,71 @@ git push
 
 ---
 
+## Restore real values after a new clone (smudge)
+
+Git stores **dummy** IPs and passwords. After `git clone`, your working tree still shows those dummies until **smudge** runs with the right local files.
+
+### What you need (keep off Git, back up securely)
+
+| File | Role |
+|------|------|
+| `sanitization.json` | Subnet/domain mappings and `salt` (must match the machine that created the learned map) |
+| `sanitization.learned.json` | Actual password/secret values learned on `git add` |
+
+Without **both** files, smudge can restore subnets from `subnet_rules` but **cannot** restore learned secrets.
+
+### Recovery on a fresh clone
+
+```bash
+cd /path/to/cloned-repo
+
+# 1. Install filter scripts + .gitattributes if this clone does not have them yet
+#    (from the sanitizer repo — see "Copy into your repo" above)
+
+# 2. Configure the filter (once per clone)
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+FILTER="${REPO_ROOT}/scripts/sanitize_filter.py"
+chmod +x "${FILTER}" "${REPO_ROOT}/scripts/discover_sanitization.py"
+git config --local filter.sanitize-secrets.clean  "python3 ${FILTER} clean"
+git config --local filter.sanitize-secrets.smudge "python3 ${FILTER} smudge"
+git config --local filter.sanitize-secrets.required true
+
+# 3. Copy your backed-up private files into the repo root
+cp /secure/backup/sanitization.json .
+cp /secure/backup/sanitization.learned.json .
+
+# 4. Re-run smudge on all filtered files (checkout alone may not re-apply the filter)
+git rm --cached -r .
+git reset --hard HEAD
+```
+
+After step 4, open a YAML file locally — you should see **real** customer IPs and passwords again.
+
+### Verify smudge
+
+```bash
+# Should print real values (not DUMMY_SEC_* or dummy subnets)
+grep -E 'password|192\.168|10\.' path/to/a/config.yaml | head
+
+# Optional: round-trip check on one file
+python3 scripts/sanitize_filter.py clean < path/to/config.yaml | \
+  python3 scripts/sanitize_filter.py smudge | \
+  diff -u path/to/config.yaml -
+```
+
+### Common issues
+
+| Symptom | Fix |
+|---------|-----|
+| Still seeing `DUMMY_SEC_*` | Missing or wrong `sanitization.learned.json`; or `salt` in `sanitization.json` differs from the machine that learned the secrets |
+| Subnets swapped but passwords dummy | `sanitization.json` present but `sanitization.learned.json` missing — restore the learned file from backup |
+| `git reset --hard` did nothing | Normal — reset does not re-run smudge by itself; use `git rm --cached -r .` then `git reset --hard HEAD` |
+| Filter errors on checkout | Ensure `sanitization.json` is valid (no overlapping dummy/actual CIDRs) and Python 3 is available |
+
+**Back up** `sanitization.json` and `sanitization.learned.json` whenever you sanitize new secrets (e.g. after commits that add new passwords). Store them outside the repo — password manager, encrypted volume, or team secrets store.
+
+---
+
 ## Quick test
 
 ```bash
