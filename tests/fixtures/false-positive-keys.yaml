@@ -1,0 +1,11 @@
+settings:
+  tls_enabled: true
+  registry: docker.io
+  bind_address: 0.0.0.0
+  signing_policy: standard
+stringData:
+  tls.crt: |
+    -----BEGIN PRIVATE KEY-----
+    MIIEprivateKeyExample
+    -----END PRIVATE KEY-----
+registry_password: pull-secret-value

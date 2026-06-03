@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tls-ca-chain
+type: Opaque
+stringData:
+  tls.crt: |
+    -----BEGIN CERTIFICATE-----
+    MIIBcaChainCertOne
+    -----END CERTIFICATE-----
+
+    -----BEGIN CERTIFICATE-----
+    MIIBcaChainCertTwo
+    -----END CERTIFICATE-----

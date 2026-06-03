@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: tls-strip
+type: Opaque
+stringData:
+  tls.crt: |-
+    -----BEGIN CERTIFICATE-----
+    MIIBstripExampleCertData
+    -----END CERTIFICATE-----

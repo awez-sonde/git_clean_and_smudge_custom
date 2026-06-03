@@ -55,15 +55,26 @@ K8S_ENV_NAME_RE = re.compile(
     r"^(\s*)- name:\s*(?:\"([^\"]*)\"|'([^']*)'|(\S+))\s*(#.*)?$"
 )
 
-# YAML block scalar: key: |  or  key: >
+# YAML block scalar: |, |-, |+, |2, >, >-, etc. (indicator + optional digit + optional +|-)
 BLOCK_SCALAR_START_RE = re.compile(
-    r"^(\s*)([A-Za-z0-9_.-]+)(\s*:\s*)(\||>)\s*(#.*)?$"
+    r"^(\s*)([A-Za-z0-9_.-]+)(\s*:\s*)"
+    r"([|>]\d*(?:[+-])?)\s*(#.*)?$"
 )
 
-# JSON double-quoted key/value pairs
+# JSON double-quoted key/string value
 JSON_STRING_PAIR_RE = re.compile(
     r'"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"(\s*,)?'
 )
+
+# JSON non-string scalars for sensitive keys
+JSON_SCALAR_PAIR_RE = re.compile(
+    r'"((?:[^"\\]|\\.)*)"\s*:\s*'
+    r"(null|true|false|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"
+    r"(\s*,)?",
+    re.IGNORECASE,
+)
+
+JSON_LEARNED_PREFIX = "__json__"
 
 # Hostname rewrite only on value side of these keys
 HOST_VALUE_KEY_RE = re.compile(
@@ -73,7 +84,8 @@ HOST_VALUE_KEY_RE = re.compile(
 
 QUOTED_STRING_RE = re.compile(r'"([^"\\]*(?:\\.[^"\\]*)*)"')
 
-DEFAULT_KEY_SUBSTRINGS = (
+# Simple substring hits (always checked)
+BUILTIN_KEY_SUBSTRINGS = (
     "password",
     "passwd",
     "pwd",
@@ -99,10 +111,11 @@ DEFAULT_KEY_SUBSTRINGS = (
     "username",
     "admin_pass",
     "ldap",
-    "bind",
     "auth_token",
     "auth_key",
-    "registry",
+    "registry_password",
+    "registry_token",
+    "registry_secret",
     "pullsecret",
     "pull_secret",
     "dockerconfig",
@@ -110,17 +123,15 @@ DEFAULT_KEY_SUBSTRINGS = (
     "truststore",
     "sshkey",
     "ssh_key",
-    "signing",
-    "encryption",
     "certificate",
     "cacert",
     "ca_cert",
-    "tls",
     "connstring",
     "connectionstring",
     "connection_string",
-    "license",
 )
+
+DEFAULT_KEY_SUBSTRINGS = BUILTIN_KEY_SUBSTRINGS
 
 DEFAULT_SENSITIVE_KEYS: frozenset[str] = frozenset()
 K8S_VALUE_KEY = "value"
@@ -504,19 +515,72 @@ def _k8s_env_name_from_match(groups: tuple) -> str:
     return dq if dq is not None else (sq if sq is not None else (bare or ""))
 
 
+def _normalize_field_key(name: str) -> str:
+    return name.lower().replace("-", "_").replace(".", "_")
+
+
+def _matches_sensitive_key(normalized: str) -> bool:
+    """Tight key matching — avoids tls_enabled, registry: URL, bare bind/signing/license."""
+    for sub in BUILTIN_KEY_SUBSTRINGS:
+        if sub in normalized:
+            return True
+    if re.search(
+        r"(?:^|_)(?:tls[_]?(?:key|crt|cert|certificate|pem|priv|private|ca)"
+        r"|(?:key|crt|cert|pem|priv|private|ca)[_]tls)(?:_|$)",
+        normalized,
+    ):
+        return True
+    if re.search(
+        r"(?:signing|encryption)[_]?(?:key|secret|password|token)"
+        r"|(?:key|secret|password|token)[_]?(?:signing|encryption)",
+        normalized,
+    ):
+        return True
+    if re.search(
+        r"license[_]?(?:key|secret|password|token)"
+        r"|(?:key|secret|password|token)[_]?license",
+        normalized,
+    ):
+        return True
+    return False
+
+
 def _is_sensitive_key_name(name: str, cfg: SensitiveFields) -> bool:
     if not name:
         return False
-    normalized = name.lower().replace("-", "_")
+    normalized = _normalize_field_key(name)
 
     if cfg.match_mode in ("exact", "both") and cfg.keys:
         if normalized in cfg.keys:
             return True
 
-    if cfg.match_mode in ("contains", "both") and cfg.key_substrings:
-        return any(sub in normalized for sub in cfg.key_substrings)
+    if cfg.match_mode in ("contains", "both"):
+        if _matches_sensitive_key(normalized):
+            return True
+        if cfg.key_substrings:
+            return any(sub in normalized for sub in cfg.key_substrings)
 
     return False
+
+
+def _json_learned_key(kind: str, actual: str) -> str:
+    return f"{JSON_LEARNED_PREFIX}{kind}__{actual}"
+
+
+def _lookup_learned_by_dummy(
+    dummy: str, learned: dict[str, str]
+) -> tuple[str | None, str | None]:
+    """Return (restored_literal, json_kind). json_kind None for plain string secrets."""
+    for actual_key, mapped_dummy in learned.items():
+        if mapped_dummy != dummy:
+            continue
+        if actual_key.startswith(JSON_LEARNED_PREFIX):
+            rest = actual_key[len(JSON_LEARNED_PREFIX) :]
+            kind, _, literal = rest.partition("__")
+            if kind and literal:
+                return literal, kind
+        return actual_key, None
+    return None, None
 
 
 def _replace_field_value(
@@ -533,9 +597,9 @@ def _replace_field_value(
         return None, False
 
     if reverse:
-        for actual, dummy in learned.items():
-            if dummy == value:
-                return actual, False
+        restored, _json_kind = _lookup_learned_by_dummy(value, learned)
+        if restored is not None:
+            return restored, False
         if value.startswith(cfg.dummy_prefix):
             return None, False
         return None, False
@@ -582,17 +646,27 @@ def _indent_width(line: str) -> int:
 
 
 def _block_body_text(body_lines: list[str], content_indent: int) -> str:
-    """Normalize YAML block scalar body (strip block indentation, preserve line breaks)."""
+    """Block body for learned map — preserves blank lines between PEM blocks."""
     parts: list[str] = []
     for line in body_lines:
         body, _ = _split_line(line)
         if not body.strip():
-            continue
-        if len(body) >= content_indent:
+            parts.append("")
+        elif len(body) >= content_indent:
             parts.append(body[content_indent:])
         else:
             parts.append(body.strip())
     return "\n".join(parts)
+
+
+def _emit_block_body_lines(
+    block_text: str, pad: str, newline: str, lines_out: list[str]
+) -> None:
+    for ln in block_text.split("\n"):
+        if ln == "":
+            lines_out.append(newline)
+        else:
+            lines_out.append(f"{pad}{ln}{newline}")
 
 
 def apply_json_field_rules(
@@ -606,13 +680,20 @@ def apply_json_field_rules(
 ) -> tuple[str, dict[str, str], bool]:
     dirty = False
 
-    def repl(match: re.Match[str]) -> str:
+    def repl_string(match: re.Match[str]) -> str:
         nonlocal dirty
         key, value, comma = match.group(1), match.group(2), match.group(3)
         if not _is_sensitive_key_name(key, cfg):
             return match.group(0)
         if key.lower() == "email" and "@" in value and not reverse:
             return match.group(0)
+        if reverse:
+            restored, json_kind = _lookup_learned_by_dummy(value, learned)
+            if restored is None:
+                return match.group(0)
+            if json_kind:
+                return f'"{key}": {restored}{comma}'
+            return f'"{key}": "{restored}"{comma}'
         new_value, entry_dirty = _replace_field_value(
             value, cfg, salt, learned, reverse=reverse, auto_learn=auto_learn
         )
@@ -622,7 +703,34 @@ def apply_json_field_rules(
             return match.group(0)
         return f'"{key}": "{new_value}"{comma}'
 
-    return JSON_STRING_PAIR_RE.sub(repl, text), learned, dirty
+    def repl_scalar(match: re.Match[str]) -> str:
+        nonlocal dirty
+        key, literal, comma = match.group(1), match.group(2), match.group(3)
+        if not _is_sensitive_key_name(key, cfg):
+            return match.group(0)
+        kind = literal.lower()
+        if reverse:
+            new_value, entry_dirty = _replace_field_value(
+                literal, cfg, salt, learned, reverse=True, auto_learn=False
+            )
+            if new_value is None:
+                return match.group(0)
+            return f'"{key}": {new_value}{comma}'
+        new_dummy, entry_dirty = _replace_field_value(
+            literal, cfg, salt, learned, reverse=False, auto_learn=False
+        )
+        if new_dummy is None:
+            new_dummy = secret_token(literal, cfg, salt)
+        if auto_learn:
+            jkey = _json_learned_key(kind, literal)
+            if learned.get(jkey) != new_dummy:
+                learned[jkey] = new_dummy
+                dirty = True
+        return f'"{key}": "{new_dummy}"{comma}'
+
+    text = JSON_STRING_PAIR_RE.sub(repl_string, text)
+    text = JSON_SCALAR_PAIR_RE.sub(repl_scalar, text)
+    return text, learned, dirty
 
 
 def apply_sensitive_field_rules(
@@ -653,7 +761,7 @@ def apply_sensitive_field_rules(
 
         block_m = BLOCK_SCALAR_START_RE.match(body)
         if block_m:
-            indent, key, sep, _marker, comment = block_m.groups()
+            indent, key, sep, marker, comment = block_m.groups()
             if _is_sensitive_key_name(key, cfg):
                 base_indent = len(indent)
                 body_lines: list[str] = []
@@ -685,13 +793,12 @@ def apply_sensitive_field_rules(
 
                 if new_token is not None and new_token != block_core:
                     pad = indent + "  "
-                    header = f"{indent}{key}{sep}|"
+                    header = f"{indent}{key}{sep}{marker}"
                     if comment:
                         header += comment
                     lines_out.append(header + newline)
                     if reverse:
-                        for ln in new_token.split("\n"):
-                            lines_out.append(f"{pad}{ln}{newline}")
+                        _emit_block_body_lines(new_token, pad, newline, lines_out)
                     else:
                         lines_out.append(f"{pad}{new_token}{newline}")
                     i = j

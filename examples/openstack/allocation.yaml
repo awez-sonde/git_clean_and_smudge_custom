@@ -5,7 +5,6 @@ parameters:
   AodhDatabasePassword: DUMMY_SEC_d09b98daf1af
   BarbicanDatabasePassword: DUMMY_SEC_d09b98daf1af
   admin_user: DUMMY_SEC_28ef41419675
-  ldap_bind: DUMMY_SEC_6901c3021244
   ldap_bind_password: DUMMY_SEC_73705c7b5a1f
   auth_url: DUMMY_SEC_a673ce453a15
   IdentityAuthURL: DUMMY_SEC_380e306d5a6d

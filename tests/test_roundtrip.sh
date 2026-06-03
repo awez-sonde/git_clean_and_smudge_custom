@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Round-trip clean → smudge for IP, password, CIDR, and JSON password (findings 1–4, 7).
+# Round-trip clean → smudge; byte-identical restore (findings 1–5).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -24,43 +24,51 @@ roundtrip_file() {
   original="$(cat "$file")"
   cleaned="$(python3 "${FILTER}" clean < "$file")"
   restored="$(printf '%s' "$cleaned" | python3 "${FILTER}" smudge)"
-  if [[ "$restored" != "$original" ]]; then
-    echo "--- original ---" >&2
-    cat "$file" >&2
-    echo "--- cleaned ---" >&2
-    printf '%s\n' "$cleaned" >&2
-    echo "--- restored ---" >&2
-    printf '%s\n' "$restored" >&2
-    fail "mismatch for $(basename "$file")"
+  if ! diff -u <(printf '%s' "$original") <(printf '%s' "$restored") >/dev/null; then
+    echo "--- diff -u $(basename "$file") ---" >&2
+    diff -u <(printf '%s' "$original") <(printf '%s' "$restored") >&2 || true
+    fail "byte mismatch for $(basename "$file")"
   fi
-  echo "OK roundtrip: $(basename "$file")"
+  echo "OK roundtrip (byte-identical): $(basename "$file")"
 }
 
-# Password + IP + CIDR
+assert_tls_clean() {
+  local file="$1"
+  local cleaned
+  cleaned="$(python3 "${FILTER}" clean < "$file")"
+  if grep -q "BEGIN CERTIFICATE" <<<"$cleaned"; then
+    echo "--- cleaned ---" >&2
+    printf '%s\n' "$cleaned" >&2
+    fail "$(basename "$file"): PEM still present after clean"
+  fi
+  if ! grep -q "DUMMY_SEC_" <<<"$cleaned"; then
+    fail "$(basename "$file"): missing dummy token after clean"
+  fi
+}
+
 roundtrip_file "${FIXTURES}/roundtrip.yaml"
-
-# JSON quoted password + IP
 roundtrip_file "${FIXTURES}/config.json"
+roundtrip_file "${FIXTURES}/config-numeric.json"
 
-# TLS block scalar (body replaced on clean, restored on smudge)
-original_tls="$(cat "${FIXTURES}/tls-block.yaml")"
-cleaned_tls="$(python3 "${FILTER}" clean < "${FIXTURES}/tls-block.yaml")"
-if grep -q "BEGIN CERTIFICATE" <<<"$cleaned_tls"; then
-  echo "--- cleaned tls ---" >&2
-  printf '%s\n' "$cleaned_tls" >&2
-  fail "tls-block.yaml PEM body still present after clean"
+assert_tls_clean "${FIXTURES}/tls-block.yaml"
+roundtrip_file "${FIXTURES}/tls-block.yaml"
+
+assert_tls_clean "${FIXTURES}/tls-block-strip.yaml"
+if ! python3 "${FILTER}" clean < "${FIXTURES}/tls-block-strip.yaml" | grep -q "tls.crt: |-"; then
+  fail "tls-block-strip.yaml: chomping marker |- not preserved on clean pass-through header"
 fi
-if ! grep -q "DUMMY_SEC_" <<<"$cleaned_tls"; then
-  fail "tls-block.yaml missing dummy token after clean"
-fi
-restored_tls="$(printf '%s' "$cleaned_tls" | python3 "${FILTER}" smudge)"
-if [[ "$restored_tls" != "$original_tls" ]]; then
-  echo "--- original tls ---" >&2
-  printf '%s\n' "$original_tls" >&2
-  echo "--- restored tls ---" >&2
-  printf '%s\n' "$restored_tls" >&2
-  fail "tls-block.yaml smudge mismatch"
-fi
-echo "OK roundtrip: tls-block.yaml (block scalar)"
+roundtrip_file "${FIXTURES}/tls-block-strip.yaml"
+
+assert_tls_clean "${FIXTURES}/tls-block-ca-chain.yaml"
+roundtrip_file "${FIXTURES}/tls-block-ca-chain.yaml"
+
+# False-positive keys: plain config untouched; secret keys sanitized
+fp="${FIXTURES}/false-positive-keys.yaml"
+fp_clean="$(python3 "${FILTER}" clean < "$fp")"
+grep -q 'tls_enabled: true' <<<"$fp_clean" || fail "tls_enabled was modified"
+grep -q 'registry: docker.io' <<<"$fp_clean" || fail "registry URL was modified"
+grep -q 'DUMMY_SEC_' <<<"$fp_clean" || fail "registry_password not sanitized"
+grep -q 'BEGIN PRIVATE KEY' <<<"$fp_clean" && fail "tls.crt PEM leaked after clean"
+roundtrip_file "$fp"
 
 echo "All roundtrip tests passed."

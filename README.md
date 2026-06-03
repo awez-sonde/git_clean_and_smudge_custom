@@ -122,9 +122,11 @@ Legacy filenames `local_secrets_map.json` still work if you already use them.
 |---------|---------|
 | `subnet_rules` | Actual → dummy CIDR (auto-filled by discover script) |
 | `email_domains` | Hostname zones (auto-filled, e.g. `awezlab.local`) |
-| `sensitive_fields.key_substrings` | Key names containing `password`, `auth`, … |
+| `sensitive_fields.key_substrings` | Extra patterns (built-in rules already match `password`, `secret`, `apikey`, …) |
 | `salt` | Stable tokens for learned secrets — set once |
 | `replacements` | Optional manual one-off strings |
+
+Built-in key matching is **tight**: it targets secret-bearing names (`password`, `registry_password`, `tls.crt`, `tls_key`, …) and does **not** treat plain config like `admin_user`, `auth_url`, `IdentityAuthURL`, `tls_enabled`, or `registry: docker.io` as secrets. Add `key_substrings` only for project-specific secret key names.
 
 Password **values** go to **`sanitization.learned.json`** on `git add`, not into `sanitization.json`.
 
@@ -145,7 +147,10 @@ git push
 ## Quick test
 
 ```bash
-python3 scripts/sanitize_filter.py clean < examples/openstack/allocation.yaml
+python3 -m unittest tests.test_ip_regex
+chmod +x tests/test_roundtrip.sh && ./tests/test_roundtrip.sh
+
+# Password fields → dummies; admin_user / auth_url stay plain text
 python3 scripts/sanitize_filter.py clean < examples/openstack/allocation.yaml
 ```
 

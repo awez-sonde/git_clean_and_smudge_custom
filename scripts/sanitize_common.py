@@ -42,6 +42,12 @@ HOSTNAME_RE = re.compile(
     r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)+\b"
 )
 
+# Lines like "version: 4.18.0.1" — IP-like token is not a customer network
+VERSION_CONTEXT_LINE_RE = re.compile(
+    r"^\s*(?:version|app[_\s]?version|kube[_\s]?version|release)\s*[:=]",
+    re.IGNORECASE,
+)
+
 RESERVED_DUMMY_NETS = [
     ipaddress.ip_network("192.0.2.0/24"),
     ipaddress.ip_network("198.51.100.0/24"),
@@ -88,6 +94,15 @@ def _is_routable_customer_net(net: ipaddress.IPv4Network) -> bool:
     return net.is_private or net.is_global
 
 
+def _ip_on_version_context_line(text: str, ip_str: str) -> bool:
+    for line in text.splitlines():
+        if ip_str not in line:
+            continue
+        if VERSION_CONTEXT_LINE_RE.match(line.strip()):
+            return True
+    return False
+
+
 def infer_networks_from_text(text: str) -> set[ipaddress.IPv4Network]:
     found: set[ipaddress.IPv4Network] = set()
     for cidr in CIDR_RE.findall(text):
@@ -98,6 +113,8 @@ def infer_networks_from_text(text: str) -> set[ipaddress.IPv4Network]:
         except ValueError:
             continue
     for ip_str in IPV4_RE.findall(text):
+        if _ip_on_version_context_line(text, ip_str):
+            continue
         try:
             ip = ipaddress.ip_address(ip_str)
         except ValueError:

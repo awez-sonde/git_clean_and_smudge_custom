@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for context-anchored IP regex and subnet round-trip (findings 7, 5)."""
+"""Tests for context-anchored IP regex, subnet round-trip, and discovery guards (5, 7)."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from sanitize_common import CIDR_RE, IPV4_RE  # noqa: E402
+from sanitize_common import CIDR_RE, IPV4_RE, infer_networks_from_text  # noqa: E402
 from sanitize_filter import (  # noqa: E402
     SubnetRule,
     apply_subnet_rules,
+    _validate_dummy_subnet_overlap,
 )
 
 
@@ -27,6 +28,19 @@ class TestIpv4Regex(unittest.TestCase):
 
     def test_skips_ip_preceded_by_digit(self) -> None:
         self.assertEqual(IPV4_RE.findall("1192.168.1.10"), [])
+
+    def test_version_line_four_octet_token(self) -> None:
+        """4.18.0.1 may match the IP regex but must not be treated as a customer network."""
+        text = "version: 4.18.0.1\n"
+        self.assertEqual(IPV4_RE.findall(text), ["4.18.0.1"])
+        nets = infer_networks_from_text(text)
+        self.assertEqual(len(nets), 0)
+
+    def test_version_line_ip_not_subnet_swapped(self) -> None:
+        rules = [SubnetRule("192.168.50.0/24", "10.0.0.0/24")]
+        original = "version: 4.18.0.1\n"
+        cleaned = apply_subnet_rules(original, rules, reverse=False)
+        self.assertEqual(cleaned, original)
 
     def test_cidr_before_ip_in_string(self) -> None:
         found = CIDR_RE.findall("range: 192.168.50.0/24")
@@ -57,8 +71,6 @@ class TestSubnetRoundTrip(unittest.TestCase):
 
 class TestDummyOverlapValidation(unittest.TestCase):
     def test_overlapping_dummy_cidrs_raise(self) -> None:
-        from sanitize_filter import _validate_dummy_subnet_overlap
-
         rules = [
             SubnetRule("192.168.1.0/24", "10.0.1.0/24"),
             SubnetRule("192.168.2.0/24", "10.0.1.0/24"),
