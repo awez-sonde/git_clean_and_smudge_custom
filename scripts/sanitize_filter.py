@@ -251,11 +251,17 @@ def save_learned(path: Path, learned: dict[str, str]) -> None:
 
 
 def _validate_dummy_subnet_overlap(rules: list[SubnetRule]) -> None:
+    actuals = [r.actual_net for r in rules]
     for i, a in enumerate(rules):
         for b in rules[i + 1 :]:
             if a.dummy_net.overlaps(b.dummy_net):
                 raise ValueError(
                     f"subnet_rules dummy CIDRs overlap: {a.dummy_cidr} and {b.dummy_cidr}"
+                )
+        for actual in actuals:
+            if a.dummy_net.overlaps(actual):
+                raise ValueError(
+                    f"subnet_rules dummy CIDR {a.dummy_cidr} overlaps actual CIDR {actual}"
                 )
 
 

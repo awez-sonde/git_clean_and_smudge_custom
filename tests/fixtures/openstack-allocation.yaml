@@ -1,0 +1,11 @@
+# Fixture for clean/smudge: passwords sanitize; identity fields stay clear.
+parameters:
+  AdminPassword: cmVkaGF0
+  AodhPassword: cmVkaGF0
+  AodhDatabasePassword: cmVkaGF0
+  BarbicanDatabasePassword: cmVkaGF0
+  admin_user: keystone-admin
+  ldap_bind_password: ldap-secret-value
+  auth_url: https://identity.example/v3
+  IdentityAuthURL: https://identity.example/v3
+  cluster_description: Production OpenStack cell

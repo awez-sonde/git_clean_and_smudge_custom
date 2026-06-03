@@ -1,4 +1,4 @@
-# OpenStack / TripleO-style — *Password keys sanitize; admin_user / auth URLs stay clear.
+# After clean: *Password and *bind_password → DUMMY_SEC_; identity fields stay clear below.
 parameters:
   AdminPassword: DUMMY_SEC_example_admin
   AodhPassword: DUMMY_SEC_example_aodh

@@ -79,6 +79,15 @@ class TestDummyOverlapValidation(unittest.TestCase):
             _validate_dummy_subnet_overlap(rules)
         self.assertIn("overlap", str(ctx.exception).lower())
 
+    def test_dummy_overlapping_other_actual_raises(self) -> None:
+        rules = [
+            SubnetRule("192.168.1.0/24", "10.10.10.0/24"),
+            SubnetRule("10.10.10.0/24", "192.0.2.0/24"),
+        ]
+        with self.assertRaises(ValueError) as ctx:
+            _validate_dummy_subnet_overlap(rules)
+        self.assertIn("overlaps actual", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

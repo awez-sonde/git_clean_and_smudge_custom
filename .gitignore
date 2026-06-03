@@ -8,6 +8,7 @@ local_secrets_learned.json
 .env.mapping
 scripts/__pycache__/
 tests/fixtures/.sanitization.learned.test.json
+tests/fixtures/.openstack-learned-test.json
 tests/__pycache__/
 
 # Local overrides

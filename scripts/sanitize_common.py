@@ -48,11 +48,22 @@ VERSION_CONTEXT_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# RFC 5737 documentation ranges (preferred dummy space)
 RESERVED_DUMMY_NETS = [
     ipaddress.ip_network("192.0.2.0/24"),
     ipaddress.ip_network("198.51.100.0/24"),
     ipaddress.ip_network("203.0.113.0/24"),
 ]
+
+# RFC 6598 shared address space, then 10/8 only if documentation/CGNAT pools exhaust
+RFC6598_DUMMY_POOL = ipaddress.ip_network("100.64.0.0/10")
+FALLBACK_DUMMY_POOL = ipaddress.ip_network("10.0.0.0/8")
+
+DEFAULT_DUMMY_ADDRESS_POOLS: tuple[ipaddress.IPv4Network, ...] = (
+    *RESERVED_DUMMY_NETS,
+    RFC6598_DUMMY_POOL,
+    FALLBACK_DUMMY_POOL,
+)
 
 
 def resolve_config_path(
@@ -131,27 +142,55 @@ def infer_networks_from_text(text: str) -> set[ipaddress.IPv4Network]:
     return found
 
 
-def _dummy_collides(actual: ipaddress.IPv4Network, dummy: ipaddress.IPv4Network) -> bool:
-    return actual == dummy or actual.overlaps(dummy)
+def _iter_dummy_candidates(
+    prefixlen: int,
+    address_pools: tuple[ipaddress.IPv4Network, ...],
+):
+    """Yield same-prefixlen subnets inside each pool (documentation pools first)."""
+    for pool in address_pools:
+        if prefixlen < pool.prefixlen:
+            continue
+        if prefixlen == pool.prefixlen:
+            yield pool
+            continue
+        yield from pool.subnets(new_prefix=prefixlen)
+
+
+def _dummy_candidate_rejected(
+    candidate: ipaddress.IPv4Network,
+    actual: ipaddress.IPv4Network,
+    all_actuals: set[ipaddress.IPv4Network],
+    used_dummies: set[ipaddress.IPv4Network],
+) -> bool:
+    if candidate in used_dummies:
+        return True
+    if candidate.overlaps(actual):
+        return True
+    for other_actual in all_actuals:
+        if other_actual != actual and candidate.overlaps(other_actual):
+            return True
+    for used in used_dummies:
+        if candidate.overlaps(used):
+            return True
+    return False
 
 
 def suggest_dummy_cidr(
     actual: ipaddress.IPv4Network,
     used_dummies: set[ipaddress.IPv4Network],
+    all_actuals: set[ipaddress.IPv4Network] | None = None,
+    *,
+    address_pools: tuple[ipaddress.IPv4Network, ...] | None = None,
 ) -> ipaddress.IPv4Network:
-    candidates: list[ipaddress.IPv4Network] = []
-    if actual.prefixlen == 24:
-        third = actual.network_address.packed[2]
-        candidates.append(ipaddress.ip_network(f"10.0.{third}.0/24", strict=False))
-    for slot in range(100, 256):
-        candidates.append(ipaddress.ip_network(f"10.0.{slot}.0/{actual.prefixlen}", strict=False))
-    for slot in range(1, 100):
-        candidates.append(ipaddress.ip_network(f"10.0.{slot}.0/{actual.prefixlen}", strict=False))
+    """Pick a dummy CIDR with the same prefix length as actual, avoiding all actual nets."""
+    if all_actuals is None:
+        all_actuals = {actual}
+    else:
+        all_actuals = set(all_actuals)
+    pools = address_pools if address_pools is not None else DEFAULT_DUMMY_ADDRESS_POOLS
 
-    for candidate in candidates:
-        if candidate in used_dummies:
-            continue
-        if _dummy_collides(actual, candidate):
+    for candidate in _iter_dummy_candidates(actual.prefixlen, pools):
+        if _dummy_candidate_rejected(candidate, actual, all_actuals, used_dummies):
             continue
         return candidate
     raise ValueError(f"Could not assign dummy CIDR for {actual}")
@@ -159,10 +198,11 @@ def suggest_dummy_cidr(
 
 def discover_subnet_rules(networks: set[ipaddress.IPv4Network]) -> list[dict[str, str]]:
     ordered = sorted(networks, key=lambda n: (n.prefixlen, int(n.network_address)))
+    all_actuals = set(networks)
     used: set[ipaddress.IPv4Network] = set()
     rules: list[dict[str, str]] = []
     for net in ordered:
-        dummy = suggest_dummy_cidr(net, used)
+        dummy = suggest_dummy_cidr(net, used, all_actuals)
         used.add(dummy)
         rules.append(
             {
